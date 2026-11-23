@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Ad-Free Music</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#121212" />
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body { background: #121212; color: #fff; padding-bottom: 110px; }
+    header { padding: 18px; background: #181818; border-bottom: 1px solid #282828; }
+    h1 { font-size: 20px; margin-bottom: 12px; }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; }
+    button, .file-btn {
+      background: #1DB954; color: #000; border: none; padding: 10px 14px;
+      border-radius: 20px; font-weight: 700; font-size: 14px; cursor: pointer;
+    }
+    .file-btn { background: #333; color: #fff; display: inline-block; }
+    input[type="file"] { display: none; }
+    #status { padding: 10px 18px; color: #b3b3b3; font-size: 13px; }
+    ul { list-style: none; }
+    li {
+      padding: 14px 18px; border-bottom: 1px solid #222;
+      display: flex; justify-content: space-between; align-items: center; cursor: pointer;
+    }
+    li:hover, li.active { background: #222; }
+    li.active .title { color: #1DB954; }
+    .tag { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: #2a2a2a; color: #aaa; }
+    .player-bar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: #1e1e1e; border-top: 1px solid #333; padding: 12px 16px;
+    }
+    #now-playing { font-size: 14px; font-weight: 600; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    audio { width: 100%; height: 38px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>My Ad-Free Music</h1>
+    <div class="controls">
+      <button id="drive-btn">Connect Google Drive</button>
+      <label class="file-btn">
+        + Pick Local Songs
+        <input type="file" id="local-input" accept="audio/*" multiple />
+      </label>
+    </div>
+  </header>
+
+  <div id="status">Connect Google Drive or pick local songs from your device.</div>
+  <ul id="track-list"></ul>
+
+  <div class="player-bar">
+    <div id="now-playing">Not playing</div>
+    <audio id="audio" controls></audio>
+  </div>
+
+  <script>
+    const CLIENT_ID = "246051514452-ojfhh9u7038vk6jh3jum0u1f9983c0aq.apps.googleusercontent.com";
+    const SCOPES = "https://www.googleapis.com/auth/drive.readonly";
+
+    let tokenClient;
+    let accessToken = null;
+    let tracks = [];
+    let currentIndex = -1;
+    let currentBlobUrl = null;
+
+    const audio = document.getElementById("audio");
+    const trackListEl = document.getElementById("track-list");
+    const statusEl = document.getElementById("status");
+    const nowPlayingEl = document.getElementById("now-playing");
+
+    // 1. Initialize Google Identity Services when page loads
+    window.onload = () => {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPES,
+        callback: (response) => {
+          if (response.error) {
+            statusEl.textContent = "Google sign-in failed.";
+            return;
+          }
+          accessToken = response.access_token;
+          fetchDriveTracks();
+        },
+      });
+    };
+
+    document.getElementById("drive-btn").addEventListener("click", () => {
+      tokenClient.requestAccessToken({ prompt: "" });
+    });
+
+    // 2. Fetch audio files from Google Drive
+    async function fetchDriveTracks() {
+      statusEl.textContent = "Loading songs from Google Drive...";
+      const q = encodeURIComponent("mimeType contains 'audio/' and trashed = false");
+      const res = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=100`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const data = await res.json();
+      const driveSongs = (data.files || []).map((f) => ({
+        id: f.id,
+        title: f.name.replace(/\.[^.]+$/, ""),
+        source: "drive",
+      }));
+
+      // Keep local tracks and add Drive tracks
+      tracks = [...tracks.filter((t) => t.source === "local"), ...driveSongs];
+      statusEl.textContent = `Loaded ${driveSongs.length} songs from Google Drive.`;
+      renderList();
+    }
+
+    // 3. Pick local songs from phone storage
+    document.getElementById("local-input").addEventListener("change", (e) => {
+      const files = Array.from(e.target.files);
+      const localSongs = files.map((file) => ({
+        id: URL.createObjectURL(file),
+        title: file.name.replace(/\.[^.]+$/, ""),
+        source: "local",
+      }));
+      tracks = [...tracks, ...localSongs];
+      statusEl.textContent = `Added ${localSongs.length} local song(s).`;
+      renderList();
+    });
+
+    // 4. Render track list
+    function renderList() {
+      trackListEl.innerHTML = "";
+      tracks.forEach((track, idx) => {
+        const li = document.createElement("li");
+        if (idx === currentIndex) li.classList.add("active");
+        li.innerHTML = `<span class="title">${track.title}</span><span class="tag">${track.source === "drive" ? "Drive" : "Local"}</span>`;
+        li.onclick = () => playTrack(idx);
+        trackListEl.appendChild(li);
+      });
+    }
+
+    // 5. Play selected track (Drive or Local)
+    async function playTrack(idx) {
+      if (idx < 0 || idx >= tracks.length) return;
+      currentIndex = idx;
+      const track = tracks[idx];
+      renderList();
+      nowPlayingEl.textContent = `Loading: ${track.title}...`;
+
+      if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl);
+        currentBlobUrl = null;
+      }
+
+      if (track.source === "local") {
+        audio.src = track.id;
+      } else {
+        // Fetch Drive audio with Bearer token and convert to playable Blob
+        const res = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${track.id}?alt=media`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        const blob = await res.blob();
+        currentBlobUrl = URL.createObjectURL(blob);
+        audio.src = currentBlobUrl;
+      }
+
+      audio.play();
+      nowPlayingEl.textContent = `Playing: ${track.title}`;
+      updateLockScreenControls(track.title);
+    }
+
+    // 6. Auto-play next track when current song finishes
+    audio.addEventListener("ended", () => {
+      if (currentIndex + 1 < tracks.length) playTrack(currentIndex + 1);
+    });
+
+    // 7. Lock-screen & notification controls (Media Session API)
+    function updateLockScreenControls(title) {
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: title,
+          artist: "My Ad-Free Library",
+        });
+        navigator.mediaSession.setActionHandler("previoustrack", () => playTrack(currentIndex - 1));
+        navigator.mediaSession.setActionHandler("nexttrack", () => playTrack(currentIndex + 1));
+      }
+    }
+  </script>
+</body>
+</html>
